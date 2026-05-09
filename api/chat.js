@@ -10,8 +10,28 @@ module.exports = async (req, res) => {
   if (req.method === "OPTIONS") { res.status(200).end(); return; }
   if (req.method !== "POST") { res.status(405).json({ error: "Method not allowed" }); return; }
 
-  const { messages } = req.body;
+  let body = "";
+  await new Promise((resolve) => {
+    req.on("data", chunk => body += chunk);
+    req.on("end", resolve);
+  });
+
+  let parsed;
+  try {
+    parsed = JSON.parse(body);
+  } catch(e) {
+    return res.status(400).json({ error: "Invalid JSON body: " + e.message });
+  }
+
+  const messages = parsed.messages;
+  if (!messages || !Array.isArray(messages)) {
+    return res.status(400).json({ error: "Missing messages array" });
+  }
+
   const API_KEY = process.env.ANTHROPIC_API_KEY || "";
+  if (!API_KEY) {
+    return res.status(500).json({ error: "Missing API key" });
+  }
 
   const payload = JSON.stringify({
     model: "claude-sonnet-4-20250514",
@@ -32,15 +52,24 @@ module.exports = async (req, res) => {
     }
   };
 
-  const proxyReq = https.request(options, (proxyRes) => {
-    let data = "";
-    proxyRes.on("data", chunk => data += chunk);
-    proxyRes.on("end", () => {
-      res.status(proxyRes.statusCode).json(JSON.parse(data));
+  return new Promise((resolve) => {
+    const proxyReq = https.request(options, (proxyRes) => {
+      let data = "";
+      proxyRes.on("data", chunk => data += chunk);
+      proxyRes.on("end", () => {
+        try {
+          res.status(proxyRes.statusCode).json(JSON.parse(data));
+        } catch(e) {
+          res.status(500).json({ error: "Parse error: " + data.substring(0, 200) });
+        }
+        resolve();
+      });
     });
+    proxyReq.on("error", (e) => {
+      res.status(500).json({ error: e.message });
+      resolve();
+    });
+    proxyReq.write(payload);
+    proxyReq.end();
   });
-
-  proxyReq.on("error", (e) => res.status(500).json({ error: e.message }));
-  proxyReq.write(payload);
-  proxyReq.end();
 };
